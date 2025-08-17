@@ -145,16 +145,31 @@ For **fine-grained tokens**:
 ## Architecture
 
 ```
-┌─────────────────┐    ┌──────────────┐    ┌─────────────┐
-│   GitHub Repo   │───▶│   Heimdall   │───▶│    Groq     │
-│   (Webhook)     │    │   FastAPI    │    │   LLM API   │
-└─────────────────┘    └──────────────┘    └─────────────┘
-                              │
-                              ▼
-                       ┌──────────────┐
-                       │   GitHub     │
-                       │   Comments   │
-                       └──────────────┘
+┌─────────────────┐
+│   GitHub Repo   │
+│   (Webhook)     │
+└───────┬─────────┘
+        │
+        ▼
+┌─────────────────────────┐
+│     Heimdall (API)      │ ◄──────────┐
+│  ─ FastAPI Webhook      │           │ (Analysis Result)
+│  ─ GitHubService        │           │
+│  ─ LLMService           │           │
+└───────┬─────────┬───────┘           │
+        │         │                   │
+┌───────▼──────┐  │  ┌─────────────┐  │
+│  GitHub API  │  └─▶│  Groq LLM   │──┘
+│ (fetch diff) │     │  Analysis   │
+└──────────────┘     └─────────────┘
+        │
+        │ (Heimdall then posts the comment)
+        │
+        ▼
+┌──────────────┐
+│  GitHub API  │
+│(commit cmts) │
+└──────────────┘
 ```
 
 ## Deployment
@@ -210,13 +225,7 @@ Validates JWT token and returns authenticated user object.
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+Contributions are welcome! Feel free to submit issues, feature requests, or pull requests.
 
 ## Troubleshooting
 
@@ -239,7 +248,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
