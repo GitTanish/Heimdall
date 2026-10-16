@@ -14,7 +14,7 @@ Heimdall is an intelligent code review agent that automatically analyzes your Gi
 
 ## Tech Stack
 
-![Python](https://img.shields.io/badge/python-v3.8+-blue.svg)
+![Python](https://img.shields.io/badge/python-v3.10+-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)
 ![Groq](https://img.shields.io/badge/Groq-LLama3_70B-orange)
 
@@ -33,10 +33,14 @@ Here's Heimdall in action — automatically reviewing a commit and posting struc
 ## How It Works
 
 1. **Webhook Trigger**: GitHub sends a webhook when code is pushed to your repository
-2. **Diff Retrieval**: Heimdall fetches the commit diff using GitHub's API
-3. **AI Analysis**: The code changes are analyzed by Groq's Llama 3 70B model
-4. **Review Generation**: AI generates a structured review with actionable insights
-5. **Comment Posting**: Review is automatically posted as a comment on the commit
+2. **Signature Verification**: Heimdall validates the `X-Hub-Signature-256` HMAC and rejects forged payloads
+3. **Diff Retrieval**: Heimdall fetches the diff of **each commit** in the push using GitHub's API
+4. **AI Analysis**: The code changes are analyzed by Groq's Llama 3 70B model
+5. **Review Generation**: AI generates a structured review with actionable insights
+6. **Comment Posting**: The review is posted as a comment on that specific commit
+
+A failure on one commit does not stop the others — the response reports a
+per-commit breakdown so a partial review is visible.
 
 ## Review Components
 
@@ -51,7 +55,7 @@ Each Heimdall review includes:
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.10+ (the code uses PEP 604 `X | None` annotations)
 - GitHub repository with webhook access
 - Groq API account
 
@@ -73,7 +77,16 @@ Each Heimdall review includes:
    ```env
    GROQ_API_KEY=your_groq_api_key_here
    GITHUB_TOKEN=your_github_personal_access_token
+   GITHUB_WEBHOOK_SECRET=any_random_string_you_choose
    ```
+   Generate a good secret with:
+   ```bash
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
+   `GITHUB_WEBHOOK_SECRET` must match the **Secret** you set on the GitHub
+   webhook (step 5 under *GitHub Webhook Setup* below). Heimdall verifies every
+   delivery against it and **rejects the request with 401 if the signature does
+   not match**. Without it the webhook endpoint returns 503 and posts nothing.
 
 4. **Run the application**
    - Local development:
@@ -97,8 +110,9 @@ Each Heimdall review includes:
      Use the generated `https://xxxx.ngrok-free.app/webhook/github` as the Payload URL
    - Production: `https://yourdomain.com/webhook/github`
 4. Select **Content type**: `application/json`
-5. Choose **Just the push event**
-6. Save the webhook
+5. Set **Secret** to the same value as `GITHUB_WEBHOOK_SECRET` in your `.env`
+6. Choose **Just the push event**
+7. Save the webhook
 
 ## API Endpoints
 
@@ -113,17 +127,36 @@ Health check endpoint to verify Heimdall is running.
 ```
 
 ### `POST /webhook/github`
-Webhook endpoint for GitHub push events. Processes commits and posts AI-generated reviews.
+Webhook endpoint for GitHub push events. Validates the `X-Hub-Signature-256`
+signature, then reviews **every commit in the push** and posts a comment on each.
 
-**Expected Payload:** GitHub push event webhook payload
+**Expected Payload:** GitHub push event webhook payload, signed
 
 **Response:**
 ```json
 {
   "status": "success",
-  "message": "Review posted for commit abc123..."
+  "message": "Reviewed 2 of 2 commit(s) in octocat/hello-world",
+  "summary": { "reviewed": 2, "skipped": 0, "failed": 0 },
+  "results": [
+    { "commit": "abc123...", "status": "reviewed" },
+    { "commit": "def456...", "status": "reviewed" }
+  ]
 }
 ```
+
+**Status codes:**
+
+| Code | Meaning |
+|------|---------|
+| `200` | Processed (or deliberately skipped: non-push event, branch deletion, no commits) |
+| `400` | Body is not valid JSON, or `repository` owner/name is missing |
+| `401` | `X-Hub-Signature-256` missing or invalid |
+| `503` | `GITHUB_WEBHOOK_SECRET` not configured on the server |
+
+A push is reported as `partial` when some commits failed; the remaining commits
+are still reviewed. Reviews are capped at 20 commits per push, and diffs are
+truncated to 60,000 characters to stay inside the model context window.
 
 ## Configuration
 
@@ -133,6 +166,10 @@ Webhook endpoint for GitHub push events. Processes commits and posts AI-generate
 |----------|-------------|----------|
 | `GROQ_API_KEY` | Your Groq API key for LLM access | Yes |
 | `GITHUB_TOKEN` | GitHub Personal Access Token with repo permissions | Yes |
+| `GITHUB_WEBHOOK_SECRET` | Shared secret used to verify GitHub webhook signatures | Yes |
+
+Heimdall refuses to start if `GROQ_API_KEY` or `GITHUB_TOKEN` is missing, and
+refuses webhook deliveries (503) if `GITHUB_WEBHOOK_SECRET` is missing.
 
 ### GitHub Token Permissions
 
@@ -192,7 +229,6 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ### Using Cloud Platforms
 
 Heimdall can be deployed on:
-- **Heroku**: Use the included `Procfile`
 - **Railway**: Direct GitHub integration
 - **DigitalOcean App Platform**: Single-click deployment
 - **AWS Lambda**: With FastAPI adapter
@@ -235,6 +271,18 @@ Contributions are welcome! Feel free to submit issues, feature requests, or pull
 - Verify the webhook URL is accessible from GitHub
 - Check that the endpoint returns 200 status
 - Ensure the webhook is configured for push events
+
+**401 / "Webhook signature is invalid":**
+- `GITHUB_WEBHOOK_SECRET` in `.env` must match the **Secret** field on the GitHub webhook
+- Re-save the webhook after changing the secret; GitHub caches the setting
+- Restart Heimdall after editing `.env`
+
+**503 / "Webhook secret is not configured":**
+- `GITHUB_WEBHOOK_SECRET` is not set. Heimdall fails closed on purpose — add it before restarting
+
+**No review on a large push:**
+- Only the first 20 commits in a push are reviewed
+- Branch deletions and pushes with no commits are skipped by design
 
 **API errors:**
 - Verify your Groq API key is valid and has credits
