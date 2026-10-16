@@ -1,9 +1,40 @@
+import hashlib
+import hmac
 import json
+import logging
 from fastapi import FastAPI, Request, HTTPException
+from .config import GITHUB_WEBHOOK_SECRET
 from .github_service import GitHubService
 from .llm_service import LLMService
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+logger = logging.getLogger("heimdall")
+
 NULL_SHA = "0" * 40
+
+
+def verify_webhook_signature(body: bytes, signature: str | None) -> None:
+    """
+    Validates GitHub's `X-Hub-Signature-256` HMAC so forged payloads cannot
+    spend the LLM quota or post comments with the stored token.
+    """
+    if not GITHUB_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=503, detail="Webhook secret is not configured on the server."
+        )
+
+    if not signature or not signature.startswith("sha256="):
+        raise HTTPException(status_code=401, detail="Missing X-Hub-Signature-256 header.")
+
+    digest = hmac.new(
+        GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(f"sha256={digest}", signature):
+        print("Rejected webhook delivery with an invalid signature")
+        raise HTTPException(status_code=401, detail="Webhook signature is invalid.")
+
 
 app = FastAPI()
 
@@ -13,6 +44,12 @@ def read_root():
 
 github_service = GitHubService()
 llm_service = LLMService()
+
+if not GITHUB_WEBHOOK_SECRET:
+    logger.error(
+        "GITHUB_WEBHOOK_SECRET is not set: webhook requests will be rejected. "
+        "Set it in .env to the secret configured on the GitHub webhook."
+    )
 
 def _as_text(value, default: str = "") -> str:
     """Coerces a model-supplied field into a printable string."""
@@ -60,6 +97,7 @@ def format_review_comment(review_json: dict) -> str:
 @app.post("/webhook/github")
 async def github_webhook(request: Request):
     body = await request.body()
+    verify_webhook_signature(body, request.headers.get("X-Hub-Signature-256"))
 
     event = request.headers.get("X-GitHub-Event", "push")
     if event != "push":
