@@ -11,12 +11,27 @@ def read_root():
 github_service = GitHubService()
 llm_service = LLMService()
 
+def _as_text(value, default: str = "") -> str:
+    """Coerces a model-supplied field into a printable string."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
+def _as_list(value) -> list:
+    """Coerces a model-supplied field into a list of printable strings."""
+    if isinstance(value, list):
+        return [text for text in (_as_text(item) for item in value) if text]
+    single = _as_text(value)
+    return [single] if single else []
+
+
 def format_review_comment(review_json: dict) -> str:
     """Formats the JSON review from the LLM into a Markdown comment."""
-    summary = review_json.get("summary", "No summary provided.")
-    review_points = review_json.get("review", [])
-    documentation = review_json.get("documentation", "")
-    tests = review_json.get("tests", [])
+    summary = _as_text(review_json.get("summary"), "No summary provided.")
+    review_points = _as_list(review_json.get("review"))
+    documentation = _as_text(review_json.get("documentation"))
+    tests = _as_list(review_json.get("tests"))
 
     comment = f"### 🤖 Heimdall AI Code Review\n\n"
     comment += f"**Summary:** {summary}\n\n"
