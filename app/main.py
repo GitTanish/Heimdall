@@ -3,7 +3,8 @@ import hmac
 import json
 import logging
 from fastapi import FastAPI, Request, HTTPException
-from .config import GITHUB_WEBHOOK_SECRET
+from starlette.concurrency import run_in_threadpool
+from .config import GITHUB_WEBHOOK_SECRET, MAX_COMMITS_PER_PUSH
 from .github_service import GitHubService
 from .llm_service import LLMService
 
@@ -94,6 +95,54 @@ def format_review_comment(review_json: dict) -> str:
         
     return comment
 
+def _process_commit(owner: str, repo: str, commit_sha: str) -> dict:
+    """
+    Reviews a single commit and posts the result. Blocking (network + LLM), so
+    it is only ever called from a worker thread.
+    """
+    result: dict = {"commit": commit_sha, "status": "failed"}
+
+    try:
+        diff = github_service.get_commit_diff(owner, repo, commit_sha)
+        if not diff or not diff.strip():
+            result.update(status="skipped", reason="no diff available")
+            return result
+
+        review_json = llm_service.analyze_code_changes(diff)
+        if not review_json:
+            result["reason"] = "LLM analysis unavailable"
+            return result
+
+        comment_body = format_review_comment(review_json)
+        if github_service.post_comment_on_commit(owner, repo, commit_sha, comment_body):
+            result["status"] = "reviewed"
+        else:
+            result["reason"] = "failed to post comment"
+    except Exception:
+        # One bad commit must not abort the rest of the push or leak internals.
+        logger.exception("Unexpected error while reviewing %s", commit_sha)
+        result["reason"] = "unexpected internal error"
+
+    return result
+
+
+def _extract_commits(payload: dict) -> list:
+    """Collects the commit SHAs carried by a push payload, oldest first."""
+    shas: list = []
+    for entry in payload.get('commits') or []:
+        sha = entry.get('id') or entry.get('sha') if isinstance(entry, dict) else None
+        if sha and sha != NULL_SHA and sha not in shas:
+            shas.append(sha)
+
+    # A push of more than MAX_COMMITS_PER_PUSH commits carries no commits[] at
+    # all, so fall back to the new head: it is present and always the last one.
+    head = payload.get('after')
+    if head and head != NULL_SHA and head not in shas:
+        shas.append(head)
+
+    return shas
+
+
 @app.post("/webhook/github")
 async def github_webhook(request: Request):
     body = await request.body()
@@ -113,39 +162,49 @@ async def github_webhook(request: Request):
     if payload.get('deleted') or payload.get('after') == NULL_SHA:
         return {'status': 'skipped', 'message': 'Branch deletion is not reviewable'}
 
-    if "commits" not in payload or not payload.get('commits'):
-        return {'status':'skipped', 'message':'Payload is not a push event with commits'}
+    commit_shas = _extract_commits(payload)
+    if not commit_shas:
+        return {'status': 'skipped', 'message': 'Payload is not a push event with commits'}
 
-    try:
-        repo_info = payload['repository']
-        # FIX: Use 'login' instead of 'name' for the owner.
-        owner = repo_info['owner']['login']
-        repo = repo_info['name']
-        commit_sha = payload['after']
+    repo_info = payload.get('repository') or {}
+    # FIX: Use 'login' instead of 'name' for the owner.
+    owner = (repo_info.get('owner') or {}).get('login')
+    repo = repo_info.get('name')
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="Payload is missing repository owner/name.")
 
-        print(f"Received push event for {owner}/{repo} on commit {commit_sha}")
+    reviewable = commit_shas[:MAX_COMMITS_PER_PUSH]
+    if len(reviewable) < len(commit_shas):
+        logger.warning(
+            "Push has %d commits; only the first %d will be reviewed",
+            len(commit_shas), len(reviewable),
+        )
 
-        diff = github_service.get_commit_diff(owner, repo, commit_sha)
-        if not diff:
-            raise HTTPException(status_code=400, detail="Could not retrieve diff from GitHub.")
-        
-        review_json = llm_service.analyze_code_changes(diff)
-        if not review_json:
-            raise HTTPException(status_code=500, detail="Failed to get analysis from LLM service")
-        
-        comment_body = format_review_comment(review_json)
-        success = github_service.post_comment_on_commit(owner, repo, commit_sha, comment_body)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to post comment to GitHub.")
+    logger.info(
+        "Received push event for %s/%s on %s: %d commit(s)",
+        owner, repo, payload.get('ref', 'unknown'), len(reviewable),
+    )
 
-        print(f"Successfully processed and posted review for commit {commit_sha}")
-        return {"status": "success", "message": f"Review posted for commit {commit_sha}"}
+    # The diff fetch and the LLM call are blocking; offloading keeps a slow
+    # review from stalling the event loop for every other request.
+    results = [
+        await run_in_threadpool(_process_commit, owner, repo, sha)
+        for sha in reviewable
+    ]
 
-    except HTTPException:
-        raise
-    except KeyError as e:
-        print(f"An error occurred: missing payload field {e}")
-        raise HTTPException(status_code=400, detail=f"Payload is missing required field: {e}")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        raise HTTPException(status_code=500, detail="An internal server error occurred.") from e
+    summary = {
+        "reviewed": sum(1 for r in results if r["status"] == "reviewed"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "failed": sum(1 for r in results if r["status"] == "failed"),
+    }
+    logger.info("Finished push for %s/%s: %s", owner, repo, summary)
+
+    return {
+        "status": "success" if not summary["failed"] else "partial",
+        "message": (
+            f"Reviewed {summary['reviewed']} of {len(results)} commit(s) "
+            f"in {owner}/{repo}"
+        ),
+        "summary": summary,
+        "results": results,
+    }

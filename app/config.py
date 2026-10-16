@@ -13,3 +13,6 @@ GITHUB_API_TIMEOUT = 30
 
 # Keep prompts inside the model context window.
 MAX_DIFF_CHARS = 60000
+
+# Cap LLM spend for a single large push.
+MAX_COMMITS_PER_PUSH = 20
