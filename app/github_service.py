@@ -5,7 +5,7 @@ class GitHubService:
     def __init__(self):
         """Initializes the GitHub service with authentication headers."""
         if not GITHUB_TOKEN:
-            raise ValueError("GitHub token not found. Please check your .env file.")
+            raise ValueError("GITHUB_TOKEN not found. Set it in your .env file or environment.")
         
         self.session = requests.Session()
         self.session.headers.update({

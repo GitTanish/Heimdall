@@ -4,13 +4,12 @@ import json
 
 class LLMService: # this will interact with Groq API
     def __init__(self):
-        try:
-            self.client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-            if not os.environ.get("GROQ_API_KEY"):
-                raise ValueError("API KEY not found in .env")
-        except Exception as e:
-            print(f"Error intitializing Client:{e}")
-            self.client =None
+        api_key = os.environ.get("GROQ_API_KEY")
+        # Validate before constructing: Groq() raises its own opaque error first,
+        # which made the intended "check your .env" message unreachable.
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not found. Set it in your .env file or environment.")
+        self.client = Groq(api_key=api_key)
     
     # basically prompt template
     def _get_system_prompt(self) -> str:
