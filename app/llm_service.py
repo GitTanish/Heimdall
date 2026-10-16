@@ -1,6 +1,7 @@
 import os
 from groq import Groq, APIError
 import json
+from .config import MAX_DIFF_CHARS
 
 class LLMService: # this will interact with Groq API
     def __init__(self):
@@ -42,8 +43,10 @@ You MUST respond with a valid JSON object, and nothing else. The JSON object sho
         if not self.client:
             print("LLMService client is not initialized")
             return None
-        
-        try: 
+
+        truncated_diff = self._truncate_diff(code_diff or "")
+
+        try:
             chat_completion = self.client.chat.completions.create(
                 messages=[
                     {
@@ -52,7 +55,7 @@ You MUST respond with a valid JSON object, and nothing else. The JSON object sho
                     },
                     {
                         "role": "user",
-                        "content": f"Here is the git diff to analyze:\n\n'''diff\n{code_diff}\n'''",
+                        "content": f"Here is the git diff to analyze:\n\n'''diff\n{truncated_diff}\n'''",
                     }
                 ],
                 model="llama3-70b-8192",
@@ -60,15 +63,51 @@ You MUST respond with a valid JSON object, and nothing else. The JSON object sho
                 max_tokens=4096,
                 response_format={"type": "json_object"},
             )
-
-            response_content = chat_completion.choices[0].message.content
-            return json.loads(response_content)
         except APIError as e:
             print(f"An error occurred with the API:{e}")
             return None
+
+        response_content = self._extract_content(chat_completion)
+        if not response_content:
+            print("Received content: Unable to retrieve due to empty completion.")
+            return None
+
+        try:
+            review = json.loads(response_content)
         except json.JSONDecodeError as e:
             print(f"Failed to decode JSON from LLM response:{e}")
-            # response_content is only defined if chat_completion succeeds
-            # So, print a placeholder if it's not defined
-            print("Received content: Unable to retrieve due to decoding error.")
             return None
+
+        if not isinstance(review, dict):
+            print(f"LLM returned {type(review).__name__}, expected a JSON object.")
+            return None
+
+        return review
+
+    def _truncate_diff(self, code_diff: str) -> str:
+        """
+        Keeps the diff inside the model context window, preserving both the
+        start (file headers) and the tail (final hunks) of an oversized diff.
+        """
+        if len(code_diff) <= MAX_DIFF_CHARS:
+            return code_diff
+
+        head = (MAX_DIFF_CHARS * 3) // 4
+        tail = MAX_DIFF_CHARS - head
+        omitted = len(code_diff) - MAX_DIFF_CHARS
+        print(f"Diff of {len(code_diff)} chars truncated to {MAX_DIFF_CHARS} ({omitted} omitted)")
+        return (
+            f"{code_diff[:head]}\n"
+            f"\n... [diff truncated, {omitted} characters omitted] ...\n\n"
+            f"{code_diff[-tail:]}"
+        )
+
+    @staticmethod
+    def _extract_content(chat_completion) -> str | None:
+        """Pulls the message text out of a Groq completion, if there is one."""
+        choices = getattr(chat_completion, "choices", None)
+        if not choices:
+            return None
+
+        content = getattr(choices[0].message, "content", None)
+        return content if isinstance(content, str) and content.strip() else None

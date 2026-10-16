@@ -9,3 +9,6 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 # Bound every outbound GitHub call so a stalled socket cannot pin a worker.
 GITHUB_API_TIMEOUT = 30
+
+# Keep prompts inside the model context window.
+MAX_DIFF_CHARS = 60000
