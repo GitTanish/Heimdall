@@ -1,6 +1,9 @@
+import json
 from fastapi import FastAPI, Request, HTTPException
 from .github_service import GitHubService
 from .llm_service import LLMService
+
+NULL_SHA = "0" * 40
 
 app = FastAPI()
 
@@ -56,11 +59,25 @@ def format_review_comment(review_json: dict) -> str:
 
 @app.post("/webhook/github")
 async def github_webhook(request: Request):
-    payload = await request.json()
+    body = await request.body()
+
+    event = request.headers.get("X-GitHub-Event", "push")
+    if event != "push":
+        return {'status': 'skipped', 'message': f"Ignoring '{event}' event"}
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Request body is not valid JSON.")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+
+    if payload.get('deleted') or payload.get('after') == NULL_SHA:
+        return {'status': 'skipped', 'message': 'Branch deletion is not reviewable'}
 
     if "commits" not in payload or not payload.get('commits'):
         return {'status':'skipped', 'message':'Payload is not a push event with commits'}
-    
+
     try:
         repo_info = payload['repository']
         # FIX: Use 'login' instead of 'name' for the owner.
@@ -86,8 +103,11 @@ async def github_webhook(request: Request):
         print(f"Successfully processed and posted review for commit {commit_sha}")
         return {"status": "success", "message": f"Review posted for commit {commit_sha}"}
 
+    except HTTPException:
+        raise
+    except KeyError as e:
+        print(f"An error occurred: missing payload field {e}")
+        raise HTTPException(status_code=400, detail=f"Payload is missing required field: {e}")
     except Exception as e:
         print(f"An error occurred: {e}")
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail="An internal server error occurred.") from e
